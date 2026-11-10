@@ -21,6 +21,23 @@ REST = os.environ.get("EB_HA_REST", "http://supervisor/core/api")
 WS = os.environ.get("EB_HA_WS", "ws://supervisor/core/websocket")
 
 
+def _schoon(x):
+    """NaN/oneindig -> None en numpy-getallen -> gewone getallen (HA weigert NaN in JSON)."""
+    import math
+    if isinstance(x, dict):
+        return {k: _schoon(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_schoon(v) for v in x]
+    if hasattr(x, "item") and not isinstance(x, (str, bytes)):
+        try:
+            x = x.item()
+        except Exception:
+            pass
+    if isinstance(x, float) and not math.isfinite(x):
+        return None
+    return x
+
+
 class HA:
     def __init__(self, token: str | None = None):
         self.token = token or os.environ.get("SUPERVISOR_TOKEN", "")
@@ -42,9 +59,10 @@ class HA:
         return r.json()
 
     def set_state(self, entity_id: str, state, attributes: dict | None = None) -> None:
-        body = {"state": str(state), "attributes": attributes or {}}
+        body = {"state": str(state), "attributes": _schoon(attributes or {})}
         try:
-            r = self.s.post(f"{REST}/states/{entity_id}", data=json.dumps(body, default=str), timeout=30)
+            r = self.s.post(f"{REST}/states/{entity_id}", data=json.dumps(body, default=str, allow_nan=False),
+                            timeout=30)
             r.raise_for_status()
         except Exception as e:  # publiceren mag de planner nooit laten crashen
             log.warning("set_state %s mislukt: %s", entity_id, e)

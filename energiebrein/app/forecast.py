@@ -58,8 +58,17 @@ def weer_ophalen(lat: float, lon: float, helling: float, azimut_kompas: float,
         "past_days": past_days, "forecast_days": forecast_days,
         "timezone": "UTC",
     }
-    r = requests.get(OM_URL, params=params, timeout=60)
-    r.raise_for_status()
+    laatste = None
+    for poging in range(3):  # Open-Meteo is soms traag vanaf de Pi: korter wachten, vaker proberen
+        try:
+            r = requests.get(OM_URL, params=params, timeout=25)
+            r.raise_for_status()
+            break
+        except Exception as e:
+            laatste = e
+            log.warning("Open-Meteo poging %d mislukt: %s", poging + 1, e)
+    else:
+        raise RuntimeError(f"Open-Meteo onbereikbaar: {laatste}")
     h = r.json()["hourly"]
     df = pd.DataFrame(h)
     df["time"] = pd.to_datetime(df["time"], utc=True)
@@ -204,3 +213,66 @@ class LoadModel:
         p50 = np.clip(self.m50.predict(X), 0.05, None)
         p80 = np.maximum(np.clip(self.m80.predict(X), 0.05, None), p50)
         return p50, p80
+
+
+# ---------------------------------------------------------------- terugval: weer uit Home Assistant
+def zonnestand(idx: pd.DatetimeIndex, lat: float, lon: float):
+    """Zonnehoogte en -azimut (graden, azimut kompas) - eenvoudige NOAA-benadering, ruim nauwkeurig genoeg."""
+    t = idx.tz_convert("UTC")
+    doy = t.dayofyear.to_numpy()
+    uur = t.hour.to_numpy() + t.minute.to_numpy() / 60.0
+    g = 2 * np.pi / 365.0 * (doy - 1 + (uur - 12) / 24)
+    decl = (0.006918 - 0.399912 * np.cos(g) + 0.070257 * np.sin(g) - 0.006758 * np.cos(2 * g)
+            + 0.000907 * np.sin(2 * g) - 0.002697 * np.cos(3 * g) + 0.00148 * np.sin(3 * g))
+    eqt = 229.18 * (0.000075 + 0.001868 * np.cos(g) - 0.032077 * np.sin(g) - 0.014615 * np.cos(2 * g)
+                    - 0.040849 * np.sin(2 * g))
+    tst = uur * 60 + eqt + 4 * lon
+    ha = np.radians(tst / 4 - 180)
+    la = np.radians(lat)
+    cosz = np.sin(la) * np.sin(decl) + np.cos(la) * np.cos(decl) * np.cos(ha)
+    elev = np.degrees(np.arcsin(np.clip(cosz, -1, 1)))
+    az = np.degrees(np.arctan2(np.sin(ha), np.cos(ha) * np.sin(la) - np.tan(decl) * np.cos(la))) + 180
+    return elev, az
+
+
+def gti_schatting(idx, lat, lon, helling, azimut_kompas, bewolking_pct):
+    """Instraling op het paneelvlak uit zonnestand + bewolking (Kasten-Czeplak)."""
+    elev, az = zonnestand(idx, lat, lon)
+    sin_e = np.clip(np.sin(np.radians(elev)), 0, None)
+    ghi_hel = 1098 * sin_e * np.exp(-0.057 / np.maximum(sin_e, 0.05)) * (elev > 0)
+    ghi = ghi_hel * (1 - 0.75 * (np.clip(bewolking_pct, 0, 100) / 100.0) ** 3.4)
+    b, ap = np.radians(helling), np.radians(azimut_kompas)
+    e, a = np.radians(np.maximum(elev, 0)), np.radians(az)
+    cos_i = np.sin(e) * np.cos(b) + np.cos(e) * np.sin(b) * np.cos(a - ap)
+    kd = 0.3 + 0.7 * (np.clip(bewolking_pct, 0, 100) / 100.0)  # diffuus aandeel
+    straal = ghi * (1 - kd) * np.clip(cos_i, 0, None) / np.maximum(sin_e, 0.1)
+    diffuus = ghi * kd * (1 + np.cos(b)) / 2
+    return np.clip(straal + diffuus, 0, 1100)
+
+
+def weer_uit_ha(ha, entity_id: str, lat, lon, helling, azimut_kompas) -> pd.DataFrame | None:
+    """Uurverwachting van een HA-weerentiteit (temperatuur, bewolking) + geschatte GTI."""
+    try:
+        r = ha.s.post(f"{ha_rest()}/services/weather/get_forecasts?return_response",
+                      json={"entity_id": entity_id, "type": "hourly"}, timeout=30)
+        r.raise_for_status()
+        fc = r.json()["service_response"][entity_id]["forecast"]
+    except Exception as e:
+        log.warning("weer uit HA mislukt: %s", e)
+        return None
+    df = pd.DataFrame(fc)
+    df["time"] = pd.to_datetime(df["datetime"], utc=True)
+    df = df.set_index("time")
+    out = pd.DataFrame(index=df.index)
+    out["To_fc"] = df["temperature"].astype(float)
+    out["cloud"] = df.get("cloud_coverage", pd.Series(50.0, index=df.index)).astype(float).fillna(50)
+    mid = out.index + pd.Timedelta(minutes=30)
+    out["gti"] = gti_schatting(mid, lat, lon, helling, azimut_kompas, out["cloud"].to_numpy())
+    out["ghi"] = out["gti"]
+    log.info("weer: terugval op %s (%d uur)", entity_id, len(out))
+    return out
+
+
+def ha_rest():
+    from ha import REST
+    return REST

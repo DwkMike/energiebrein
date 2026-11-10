@@ -19,7 +19,7 @@ from prices import forecast_uit_state, prijzen_voor, terugleverprijs, is_salderi
 from schema import comfortgrenzen, tapwatervraag, boiler_energie
 
 log = logging.getLogger("energiebrein")
-VERSIE = "0.1.4"
+VERSIE = "0.1.5"
 UITVOER = os.environ.get("EB_UITVOER", "/homeassistant/energiebrein")
 
 
@@ -88,6 +88,10 @@ class Brein:
                                               past_days=1, forecast_days=3)
         except Exception as e:
             log.warning("weer verversen mislukt: %s", e)
+            fb = forecast.weer_uit_ha(self.ha, o.get("ent_weer", "weather.forecast_thuis"), self.lat, self.lon,
+                                      o["pv_helling"], o["pv_azimut"])
+            if fb is not None:
+                self.weer = fb
         w = None
         if self.weer is not None:
             w = self.weer.reindex(self.weer.index.union(idx)).interpolate(method="time").reindex(idx)
