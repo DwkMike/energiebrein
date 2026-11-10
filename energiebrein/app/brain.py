@@ -19,7 +19,7 @@ from prices import forecast_uit_state, prijzen_voor, terugleverprijs, is_salderi
 from schema import comfortgrenzen, tapwatervraag, boiler_energie
 
 log = logging.getLogger("energiebrein")
-VERSIE = "0.1.3"
+VERSIE = "0.1.4"
 UITVOER = os.environ.get("EB_UITVOER", "/homeassistant/energiebrein")
 
 
@@ -204,7 +204,8 @@ class Brein:
              f"Historie: {len(self.hist)} uren", ""]
         L += ["## Huismodel", "```", json.dumps(self.house.to_dict(), indent=1), "```", ""]
         L += ["## Warmtepomp (COP)", "```", json.dumps(self.cop.to_dict(), indent=1), "```",
-              f"COP 7/35: {self.cop.cop(7, 35):.2f} | 2/45: {self.cop.cop(2, 45):.2f} | -5/50: {self.cop.cop(-5, 50):.2f}", ""]
+              f"COP 7/35: {self.cop.cop(7, 35):.2f} | 2/45: {self.cop.cop(2, 45):.2f} | -5/50: {self.cop.cop(-5, 50):.2f}",
+              f"Methode: {self.cop.methode}, {self.cop.n_dagen} dagen, gemiddelde afwijking dagverbruik {self.cop.dagfout_pct:.1f}%", ""]
         L += ["## Voorspellers",
               f"- Zon: {'LightGBM' if self.pv.model is not None else 'fysisch'}; MAE {self.pv.mae:.3f} kW",
               f"- Basisverbruik: MAE {self.load.mae:.3f} kW (naief 7-dagenprofiel {self.load.mae_naief:.3f} kW)", ""]

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -83,3 +84,51 @@ class HA:
         if end is not None:
             payload["end_time"] = end.astimezone(timezone.utc).isoformat()
         return self._ws_call(payload) or {}
+
+
+class TriggerLuisteraar:
+    """Houdt één websocket open en wacht op een statuswijziging van een entiteit (event-driven).
+
+    wacht(timeout) geeft True bij een wijziging en False bij time-out (vangnet).
+    Bij een verbroken verbinding wordt automatisch opnieuw verbonden.
+    """
+
+    def __init__(self, ha: "HA", entity_id: str):
+        self.ha = ha
+        self.entity_id = entity_id
+        self.ws = None
+
+    def _verbind(self):
+        ws = websocket.create_connection(WS, timeout=30)
+        json.loads(ws.recv())
+        ws.send(json.dumps({"type": "auth", "access_token": self.ha.token}))
+        auth = json.loads(ws.recv())
+        if auth.get("type") != "auth_ok":
+            raise RuntimeError(f"websocket-auth mislukt: {auth}")
+        ws.send(json.dumps({"id": 1, "type": "subscribe_trigger",
+                            "trigger": {"platform": "state", "entity_id": self.entity_id}}))
+        self.ws = ws
+        log.info("event-driven: luistert naar %s", self.entity_id)
+
+    def wacht(self, timeout: float) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if self.ws is None:
+                    self._verbind()
+                self.ws.settimeout(max(1.0, deadline - time.time()))
+                msg = json.loads(self.ws.recv())
+                if msg.get("type") == "event":
+                    return True
+            except websocket.WebSocketTimeoutException:
+                return False
+            except Exception as e:
+                log.warning("websocket verbroken (%s), opnieuw verbinden over 30 s", e)
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
+                self.ws = None
+                time.sleep(30)
+        return False

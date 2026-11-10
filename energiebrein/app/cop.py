@@ -33,6 +33,9 @@ class CopModel:
     max_aanvoer: float = 55.0
     rmse_cop: float = float("nan")
     n_uren: int = 0
+    n_dagen: int = 0
+    dagfout_pct: float = float("nan")   # gemiddelde absolute afwijking voorspeld vs gemeten dagverbruik
+    methode: str = "standaard"
 
     def to_dict(self):
         return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in asdict(self).items()}
@@ -76,19 +79,7 @@ def fit(df) -> CopModel:
     if len(sh) < 24:
         log.warning("COP-model: te weinig uren (%d), standaardwaarden", len(sh))
         return m
-    To = sh["To"].to_numpy()
-    Tf = sh["Tflow"].to_numpy()
-    y = (sh["q_hp"] / sh["p_hp"]).to_numpy()
-
-    def r(x):
-        mm = CopModel(e0=x[0], e1=x[1])
-        return mm.cop(To, Tf) - y
-
-    res = least_squares(r, [0.45, 0.004], bounds=([0.15, -0.02], [0.8, 0.03]), loss="soft_l1", f_scale=0.5)
-    m.e0, m.e1 = map(float, res.x)
-    m.rmse_cop = float(np.sqrt(np.mean(r(res.x) ** 2)))
-    m.n_uren = int(len(sh))
-    # radiatorconstante uit (Tgem - Ti) = k * q^(1/n)
+    # 1) radiatorconstante uit (Tgem - Ti) = k * q^(1/n)
     if "Ti" in sh:
         ok = sh.dropna(subset=["Ti", "Tret"])
         ok = ok[ok["q_space"] > 0.5]
@@ -97,5 +88,68 @@ def fit(df) -> CopModel:
             x = ok["q_space"] ** (1.0 / N_RAD)
             k = float(np.median(tg / x))
             m.k_rad = float(np.clip(k, 2.0, 30.0))
+    # 2) COP fitten op DAGTOTALEN: voorspeld dagverbruik = som(q_ruimte / COP(q, Ti, To)) + som(q_tapwater / COP_tw)
+    #    tegen het gemeten dagverbruik (kWh-meter). Uurwaarden zijn bij pendelen te ruizig (aan/uit binnen het uur);
+    #    over een dag middelt dat uit. Dezelfde COP-functie als de planner gebruikt, dus consistent.
+    dag = _dagtotalen_fit(d, m)
+    if dag is None:
+        # terugval: robuuste fit op uurwaarden
+        To = sh["To"].to_numpy()
+        Tf = sh["Tflow"].to_numpy()
+        y = (sh["q_hp"] / sh["p_hp"]).to_numpy()
+
+        def r(x):
+            return CopModel(e0=x[0], e1=x[1]).cop(To, Tf) - y
+
+        res = least_squares(r, [0.45, 0.004], bounds=([0.15, -0.005], [0.8, 0.03]), loss="soft_l1", f_scale=0.5)
+        m.e0, m.e1 = map(float, res.x)
+        m.rmse_cop = float(np.sqrt(np.mean(r(res.x) ** 2)))
+        m.methode = "uur"
+    m.n_uren = int(len(sh))
     log.info("COP-model: %s", m.to_dict())
+    return m
+
+
+def _dagtotalen_fit(d, m: CopModel):
+    need = ["q_hp", "p_hp", "To", "dhw", "q_space"]
+    if not set(need) <= set(d.columns):
+        return None
+    x = d.dropna(subset=["q_hp", "p_hp", "To"]).copy()
+    x["Ti_ref"] = x["Ti"].fillna(20.0).clip(16, 24) if "Ti" in x else 20.0
+    x["q_dhw"] = x["q_hp"].where(x["dhw"].astype(bool), 0.0)
+    lok = x.index.tz_convert("Europe/Amsterdam")
+    x["datum"] = lok.date
+    n_per_dag = x.groupby("datum")["p_hp"].transform("count")
+    x = x[n_per_dag >= 22]
+    E = x.groupby("datum")["p_hp"].sum()
+    Q = x.groupby("datum")["q_hp"].sum()
+    goed = (E > 2.0) & (Q / E > 1.2) & (Q / E < 7.0)  # alleen echte stookdagen met plausibele dag-COP
+    dagen = E.index[goed.to_numpy()]
+    if len(dagen) < 5:
+        return None
+    x = x[x["datum"].isin(set(dagen))]
+    E = E.loc[dagen].to_numpy()
+    gidx = x["datum"].map({dd: i for i, dd in enumerate(dagen)}).to_numpy()
+    qs = x["q_space"].fillna(0).to_numpy()
+    qd = x["q_dhw"].to_numpy()
+    To = x["To"].to_numpy()
+    Ti = x["Ti_ref"].to_numpy()
+
+    def voorspel(p):
+        mm = CopModel(e0=p[0], e1=p[1], k_rad=m.k_rad, debiet=m.debiet)
+        cop = mm.cop_bij_vermogen(qs, Ti, To)
+        per_uur = qs / cop + qd / p[2]
+        return np.bincount(gidx, weights=per_uur, minlength=len(dagen))
+
+    def r(p):
+        return (voorspel(p) - E) / np.maximum(E, 1.0)
+
+    res = least_squares(r, [0.45, 0.004, m.cop_dhw], bounds=([0.15, -0.005, 1.5], [0.8, 0.03, 4.5]),
+                        loss="soft_l1", f_scale=0.1)
+    m.e0, m.e1, m.cop_dhw = map(float, res.x)
+    fout = np.abs(r(res.x))
+    m.dagfout_pct = float(100 * np.mean(fout))
+    m.rmse_cop = float("nan")
+    m.n_dagen = int(len(dagen))
+    m.methode = "dagtotalen"
     return m

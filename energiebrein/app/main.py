@@ -8,13 +8,14 @@ import time
 from datetime import datetime
 
 from brain import Brein, VERSIE
-from ha import HA
+from ha import HA, TriggerLuisteraar
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("energiebrein")
 
 OPTIONS = os.environ.get("EB_OPTIONS", "/data/options.json")
 HERTRAIN_UUR = 4  # lokale tijd, na middernacht als de nieuwe dag compleet is
+VANGNET_S = 1200  # als er 20 min geen prijswijziging komt, toch opnieuw plannen
 
 
 def main():
@@ -31,8 +32,8 @@ def main():
             log.exception("training mislukt, opnieuw over 5 minuten")
             time.sleep(300)
     laatste_dag = datetime.now().date()
+    luister = TriggerLuisteraar(ha, opts["ent_prijs"])
     while True:
-        start = time.time()
         try:
             brein.plan_nu()
         except Exception:
@@ -44,9 +45,9 @@ def main():
                 laatste_dag = nu.date()
             except Exception:
                 log.exception("nachtelijke training mislukt")
-        # wacht tot het volgende kwartier (+20 s zodat nieuwe prijzen/standen er zijn)
-        rest = 900 - (time.time() % 900) + 20
-        time.sleep(max(rest, 30) if time.time() - start < 900 else 30)
+        # event-driven: wacht op de volgende prijswijziging (elk kwartier); vangnet na 20 minuten
+        luister.wacht(VANGNET_S)
+        time.sleep(5)  # even wachten tot andere sensoren (SoC, zon) ook bijgewerkt zijn
 
 
 if __name__ == "__main__":
