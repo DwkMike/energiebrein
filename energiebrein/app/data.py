@@ -16,6 +16,7 @@ KOLOMMEN = {
     "Tflow": "ent_aanvoer_temp",
     "Tret": "ent_retour_temp",
     "flow": "ent_debiet",          # m3/h
+    "q_meet": "ent_wp_thermisch",  # kW thermisch volgens de warmtepomp zelf
     "p_hp_w": "ent_wp_elektrisch",  # W
     "pv_w": "ent_pv",              # W
     "house_w": "ent_huislast",     # W (totaal huis incl. WP en ELWA)
@@ -68,11 +69,17 @@ def afleiden(df: pd.DataFrame) -> pd.DataFrame:
     # basislast = alles behalve warmtepomp en ELWA
     d["base"] = (d["house"] - d["p_hp"].fillna(0) - d["elwa"]).clip(lower=0.05)
     # thermisch vermogen warmtepomp: debiet [m3/h] * 1.163 kWh/(m3 K) * dT
+    # voorkeur: thermisch vermogen zoals de warmtepomp het zelf meet (uurgemiddelde klopt dan ook
+    # bij pendelen); anders debiet x dT, wat bij aan/uit-bedrijf onderschat (gemiddelde x gemiddelde)
     if {"flow", "Tflow", "Tret"} <= set(d.columns):
         dT = (d["Tflow"] - d["Tret"]).clip(lower=0)
-        d["q_hp"] = (d["flow"].clip(lower=0) * 1.163 * dT).clip(lower=0)
+        q_calc = (d["flow"].clip(lower=0) * 1.163 * dT).clip(lower=0)
     else:
-        d["q_hp"] = np.nan
+        q_calc = pd.Series(np.nan, index=d.index)
+    if "q_meet" in d:
+        d["q_hp"] = d["q_meet"].clip(lower=0).where(d["q_meet"].notna(), q_calc)
+    else:
+        d["q_hp"] = q_calc
     # tapwaterbedrijf: warmtepomp draait en de boiler warmt op (en niet door de ELWA),
     # of een aanvoer die alleen bij tapwater voorkomt
     tank = d["tank"] if "tank" in d else pd.Series(np.nan, index=d.index)

@@ -34,6 +34,7 @@
  "ent_aanvoer_temp": "sensor.wp_water_uitlaat_temp",
  "ent_retour_temp": "sensor.wp_water_inlaat_temp",
  "ent_debiet": "sensor.wp_water_flow",
+ "ent_wp_thermisch": "sensor.wp_capaciteit",
  "ent_wp_elektrisch": "sensor.kwh_warmtepomp_buitendeel_vermogen",
  "ent_pv": "sensor.zon_productie",
  "ent_huislast": "sensor.alphaess_current_house_load",
