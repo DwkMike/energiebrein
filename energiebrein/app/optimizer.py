@@ -46,6 +46,8 @@ class Invoer:
     eb0: float                 # kWh boven 'koud'
     soc_eind_min: float | None = None   # optioneel: accu minimaal zo vol aan het eind
     eindwaarde: bool = True             # waarde van opgeslagen energie aan het eind meetellen
+    q_fix: np.ndarray | None = None     # optioneel: ruimtevermogen vastzetten (naspelen werkelijkheid)
+    accu_fix: np.ndarray | None = None  # optioneel: accuvermogen vastzetten, + = ontladen
 
 
 def plan(inv: Invoer, house, cop, o: dict, accu_export_toegestaan: bool, iteraties: int = 3) -> dict:
@@ -65,9 +67,12 @@ def plan(inv: Invoer, house, cop, o: dict, accu_export_toegestaan: bool, iterati
 
     # startschatting ruimtevermogen = stationair warmteverlies naar ondergrens
     q_guess = np.clip(house.warmteverlies_kw(inv.Tlow, inv.To), 0.3, qmax)
+    if inv.q_fix is not None:
+        q_guess = np.maximum(np.asarray(inv.q_fix, dtype=float), 0.2)
     res_best = None
     for it in range(iteraties):
-        cop_t = cop.cop_bij_vermogen(q_guess, inv.Tlow, inv.To)
+        Ti_ref = np.clip(inv.Tlow, 16.0, 24.0)  # kamertemperatuur voor de radiator/COP-berekening
+        cop_t = cop.cop_bij_vermogen(q_guess, Ti_ref, inv.To)
         res = _los_op(inv, Ad, Bd, cop_t, cop_dhw, eta, soc_min, soc_max, pmax, qmax, eb_max,
                       boiler_verlies, grid_max, o, accu_export_toegestaan, house)
         if res is None:
@@ -174,6 +179,14 @@ def _los_op(inv, Ad, Bd, cop_t, cop_dhw, eta, soc_min, soc_max, pmax, qmax, eb_m
         b[TI] = (-30, 60); b[TE] = (-30, 60)
         b[EB] = (0, eb_max)
         b[CURT] = (0, max(inv.pv[t], 0.0))
+        if inv.q_fix is not None:
+            qf = float(min(max(inv.q_fix[t], 0.0), qmax))
+            b[Q] = (qf, qf)
+        if inv.accu_fix is not None:
+            a = float(np.clip(inv.accu_fix[t], -pmax, pmax))
+            b[DIS] = (max(a, 0.0), max(a, 0.0))
+            b[CH] = (max(-a, 0.0), max(-a, 0.0))
+            b[SOC] = (None, None)
         bounds += b
     res = linprog(c, A_ub=A_ub, b_ub=np.array(bub), A_eq=A_eq, b_eq=np.array(beq),
                   bounds=bounds, method="highs")

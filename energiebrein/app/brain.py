@@ -19,7 +19,7 @@ from prices import forecast_uit_state, prijzen_voor, terugleverprijs, is_salderi
 from schema import comfortgrenzen, tapwatervraag, boiler_energie
 
 log = logging.getLogger("energiebrein")
-VERSIE = "0.1.1"
+VERSIE = "0.1.2"
 UITVOER = os.environ.get("EB_UITVOER", "/homeassistant/energiebrein")
 
 
@@ -212,11 +212,13 @@ class Brein:
             L += ["## Terugrekentest", self.bt.get("melding", ""), "",
                   f"Dagen: {self.bt.get('aantal_dagen', 0)}, werkelijk {self.bt.get('echt_totaal_eur')} EUR, "
                   f"besparing {self.bt.get('besparing_totaal_eur')} EUR ({self.bt.get('besparing_per_dag_eur')} EUR/dag)", "",
-                  "| datum | werkelijk | brein | besparing | WP kWh echt | WP kWh brein | comfort-tekort Kh |",
-                  "|---|---|---|---|---|---|---|"]
+                  f"Modelafwijking t.o.v. werkelijke kosten: {self.bt.get('modelafwijking_pct')}%", "",
+                  "| datum | werkelijk | model huidig | brein | besparing | WP kWh echt | WP kWh model | WP kWh brein | comfort-tekort Kh |",
+                  "|---|---|---|---|---|---|---|---|---|"]
             for x in self.bt.get("dagen", []):
-                L.append(f"| {x['datum']} | {x['echt_eur']} | {x['brein_eur']} | {x['besparing_eur']} | "
-                         f"{x['wp_kwh_echt']} | {x['wp_kwh_brein']} | {x['comfort_tekort_kh']} |")
+                L.append(f"| {x['datum']} | {x['echt_eur']} | {x['model_huidig_eur']} | {x['brein_eur']} | "
+                         f"{x['besparing_eur']} | {x['wp_kwh_echt']} | {x['wp_kwh_model_huidig']} | "
+                         f"{x['wp_kwh_brein']} | {x['comfort_tekort_kh']} |")
         if self.fouten:
             L += ["", "## Meldingen"] + [f"- {f}" for f in self.fouten]
         try:

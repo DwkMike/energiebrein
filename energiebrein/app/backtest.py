@@ -12,6 +12,7 @@ Eerlijkheid:
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -59,15 +60,21 @@ def run(hist: pd.DataFrame, house, cop, o: dict, dagen: int = 30) -> dict:
                      eb0=0.0, soc_eind_min=float(g["soc"].iloc[-1]) / 100 * cap, eindwaarde=False)
         o3 = dict(o, boiler_max_kwh=0.0, elwa_max_kw=0.0)
         r = plan(inv, house, cop, o3, accu_export_toegestaan=bool(o.get("accu_verkoop_toestaan_2026")))
-        if r is None:
+        # zelfde modelwereld, maar met de werkelijke warmtepomp- en accu-inzet: zo vallen modelfouten weg
+        inv_b = replace(inv, Tlow=np.full(24, -30.0), Thigh=np.full(24, 60.0), soc_eind_min=None,
+                        q_fix=g["q_space"].fillna(0).to_numpy(), accu_fix=g["batt"].fillna(0).to_numpy())
+        rb = plan(inv_b, house, cop, o3, accu_export_toegestaan=True)
+        if r is None or rb is None:
             continue
         echt = float(np.sum(g["price"] * g["grid"]))  # saldering: netto kWh * prijs
         brein = float(np.sum(p_buy * (r["imp"] - r["exp"])))
+        basis = float(np.sum(p_buy * (rb["imp"] - rb["exp"])))
         resultaten.append({
-            "datum": str(datum), "echt_eur": round(echt, 2), "brein_eur": round(brein, 2),
-            "besparing_eur": round(echt - brein, 2),
+            "datum": str(datum), "echt_eur": round(echt, 2), "model_huidig_eur": round(basis, 2),
+            "brein_eur": round(brein, 2), "besparing_eur": round(basis - brein, 2),
             "wp_kwh_echt": round(float(g["p_hp"].fillna(0).sum()), 1),
-            "wp_kwh_brein": round(float((r["q"] / r["cop"]).sum() + (g["p_hp"].fillna(0) * g["dhw"]).sum()), 1),
+            "wp_kwh_model_huidig": round(float((rb["q"] / rb["cop"]).sum()), 1),
+            "wp_kwh_brein": round(float((r["q"] / r["cop"]).sum()), 1),
             "comfort_tekort_kh": round(float(r["slo"].sum()), 2),
         })
     if not resultaten:
@@ -79,5 +86,9 @@ def run(hist: pd.DataFrame, house, cop, o: dict, dagen: int = 30) -> dict:
         "besparing_totaal_eur": round(tot, 2),
         "besparing_per_dag_eur": round(tot / len(resultaten), 2),
         "echt_totaal_eur": round(sum(x["echt_eur"] for x in resultaten), 2),
-        "melding": "perfecte voorspelling (bovengrens); realistische winst ligt lager",
+        "model_huidig_totaal_eur": round(sum(x["model_huidig_eur"] for x in resultaten), 2),
+        "modelafwijking_pct": round(100 * (sum(x["model_huidig_eur"] for x in resultaten) /
+                                           max(sum(x["echt_eur"] for x in resultaten), 0.01) - 1), 1),
+        "melding": "besparing = huidige inzet nagespeeld in het model minus brein (beide in dezelfde modelwereld); "
+                   "perfecte voorspelling, dus bovengrens",
     }

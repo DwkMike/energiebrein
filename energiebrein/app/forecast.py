@@ -176,6 +176,10 @@ class LoadModel:
         m = _Gbm(objective="quantile", alpha=0.5, **kw).fit(X.iloc[:split], y[:split])
         self.mae = float(np.mean(np.abs(m.predict(X.iloc[split:]) - y[split:])))
         self.mae_naief = float(np.mean(np.abs(prof.iloc[split:].to_numpy() - y[split:])))
+        if self.mae >= self.mae_naief:
+            log.info("Lastmodel: LightGBM (%.3f) niet beter dan 7-dagenprofiel (%.3f), profiel gebruikt",
+                     self.mae, self.mae_naief)
+            return self
         self.m50 = _Gbm(objective="quantile", alpha=0.5, **kw).fit(X, y)
         self.m80 = _Gbm(objective="quantile", alpha=0.8, **kw).fit(X, y)
         log.info("Lastmodel: MAE %.3f kW (naief 7-dagenprofiel %.3f)", self.mae, self.mae_naief)
