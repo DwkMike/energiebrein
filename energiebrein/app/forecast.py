@@ -25,6 +25,29 @@ except Exception:  # pragma: no cover
 OM_URL = "https://api.open-meteo.com/v1/forecast"
 
 
+class _Gbm:
+    """Dunne wrapper rond de native LightGBM-API (geen scikit-learn nodig in de container)."""
+
+    def __init__(self, n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=20,
+                 objective="regression", alpha=None, monotone_constraints=None, verbose=-1):
+        self.rounds = n_estimators
+        self.params = {"objective": objective, "learning_rate": learning_rate, "num_leaves": num_leaves,
+                       "min_data_in_leaf": min_child_samples, "verbose": verbose, "num_threads": 2}
+        if alpha is not None:
+            self.params["alpha"] = alpha
+        if monotone_constraints is not None:
+            self.params["monotone_constraints"] = monotone_constraints
+        self.booster = None
+
+    def fit(self, X, y):
+        ds = lgb.Dataset(np.asarray(X, dtype=float), label=np.asarray(y, dtype=float), free_raw_data=True)
+        self.booster = lgb.train(self.params, ds, num_boost_round=self.rounds)
+        return self
+
+    def predict(self, X):
+        return self.booster.predict(np.asarray(X, dtype=float))
+
+
 def weer_ophalen(lat: float, lon: float, helling: float, azimut_kompas: float,
                  past_days: int = 92, forecast_days: int = 3) -> pd.DataFrame:
     az = azimut_kompas - 180.0  # kompas (180 = zuid) -> Open-Meteo (0 = zuid)
@@ -89,8 +112,8 @@ class PvModel:
         n = len(j)
         split = int(n * 0.85)
         mono = [0, 0, 0, 1, 1, 0, 0, 1]
-        self.model = lgb.LGBMRegressor(n_estimators=400, learning_rate=0.03, num_leaves=15,
-                                       min_child_samples=10, monotone_constraints=mono, verbose=-1)
+        self.model = _Gbm(n_estimators=400, learning_rate=0.03, num_leaves=15,
+                          min_child_samples=10, monotone_constraints=mono)
         self.model.fit(X.iloc[:split], y[:split])
         pred = np.clip(self.model.predict(X.iloc[split:]), 0, self.ac_max)
         self.mae = float(np.mean(np.abs(pred - y[split:])))
@@ -149,12 +172,12 @@ class LoadModel:
         X = self._X(d.index, d["To"], prof)
         y = d["base"].to_numpy()
         split = int(len(d) * 0.85)
-        kw = dict(n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=20, verbose=-1)
-        m = lgb.LGBMRegressor(objective="quantile", alpha=0.5, **kw).fit(X.iloc[:split], y[:split])
+        kw = dict(n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=20)
+        m = _Gbm(objective="quantile", alpha=0.5, **kw).fit(X.iloc[:split], y[:split])
         self.mae = float(np.mean(np.abs(m.predict(X.iloc[split:]) - y[split:])))
         self.mae_naief = float(np.mean(np.abs(prof.iloc[split:].to_numpy() - y[split:])))
-        self.m50 = lgb.LGBMRegressor(objective="quantile", alpha=0.5, **kw).fit(X, y)
-        self.m80 = lgb.LGBMRegressor(objective="quantile", alpha=0.8, **kw).fit(X, y)
+        self.m50 = _Gbm(objective="quantile", alpha=0.5, **kw).fit(X, y)
+        self.m80 = _Gbm(objective="quantile", alpha=0.8, **kw).fit(X, y)
         log.info("Lastmodel: MAE %.3f kW (naief 7-dagenprofiel %.3f)", self.mae, self.mae_naief)
         return self
 

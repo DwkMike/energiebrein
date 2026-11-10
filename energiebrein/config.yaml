@@ -1,5 +1,5 @@
 name: Energiebrein
-version: "0.1.0"
+version: "0.1.1"
 slug: energiebrein
 description: Zelflerend energiebeheer voor accu, warmtepomp en boiler op dynamische prijzen (schaduwmodus)
 url: https://github.com/DwkMike/energiebrein
