@@ -1,0 +1,105 @@
+name: Energiebrein
+version: "0.1.0"
+slug: energiebrein
+description: Zelflerend energiebeheer voor accu, warmtepomp en boiler op dynamische prijzen (schaduwmodus)
+url: https://github.com/DwkMike/energiebrein
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+homeassistant_api: true
+map:
+  - type: homeassistant_config
+    read_only: false
+options:
+  modus: schaduw
+  tarief_modus: auto
+  dubbele_eb: false
+  eb_terug_per_kwh: 0.106
+  energiebelasting: 0.1108
+  btw: 0.21
+  leverancier_opslag: 0.02
+  terug_vergoeding: 0.02
+  zonnebonus: 0.10
+  accu_capaciteit_kwh: 28.8
+  accu_max_kw: 10.0
+  accu_min_soc: 10
+  accu_max_soc: 100
+  accu_rendement: 0.95
+  accu_slijtage_per_kwh: 0.06
+  accu_verkoop_toestaan_2026: false
+  pv_kwp: 6.3
+  pv_ac_max_kw: 6.0
+  pv_helling: 35
+  pv_azimut: 158
+  wp_max_thermisch_kw: 8.0
+  wp_cop_tapwater: 2.7
+  elwa_max_kw: 3.0
+  boiler_max_kwh: 6.0
+  tapwater_kwh_per_dag: 4.0
+  comfort_temp: 20.5
+  eco_dag_temp: 19.5
+  eco_nacht_temp: 19.0
+  comfort_blokken: "06:00-08:00,16:30-22:30"
+  horizon_uur: 36
+  ent_buiten_temp: sensor.wp_buiten_temp
+  ent_kamer_temp: sensor.tado_woonkamer_temperatuur
+  ent_aanvoer_temp: sensor.wp_water_uitlaat_temp
+  ent_retour_temp: sensor.wp_water_inlaat_temp
+  ent_debiet: sensor.wp_water_flow
+  ent_wp_elektrisch: sensor.kwh_warmtepomp_buitendeel_vermogen
+  ent_pv: sensor.zon_productie
+  ent_huislast: sensor.alphaess_current_house_load
+  ent_net: sensor.alphaess_power_grid
+  ent_accu_vermogen: sensor.alphaess_power_battery
+  ent_soc: sensor.alphaess_soc_battery
+  ent_prijs: sensor.zonneplan_current_quarter_hourly_electricity_tariff
+  ent_elwa: sensor.zolder_ac_elwa_2_1_power_elwa_2
+  ent_boiler_temp: sensor.wp_tank_temp
+schema:
+  modus: list(schaduw)
+  tarief_modus: list(auto|saldering|2027)
+  dubbele_eb: bool
+  eb_terug_per_kwh: float
+  energiebelasting: float
+  btw: float
+  leverancier_opslag: float
+  terug_vergoeding: float
+  zonnebonus: float
+  accu_capaciteit_kwh: float
+  accu_max_kw: float
+  accu_min_soc: int(0,100)
+  accu_max_soc: int(0,100)
+  accu_rendement: float(0.5,1)
+  accu_slijtage_per_kwh: float
+  accu_verkoop_toestaan_2026: bool
+  pv_kwp: float
+  pv_ac_max_kw: float
+  pv_helling: float
+  pv_azimut: float
+  wp_max_thermisch_kw: float
+  wp_cop_tapwater: float
+  elwa_max_kw: float
+  boiler_max_kwh: float
+  tapwater_kwh_per_dag: float
+  comfort_temp: float
+  eco_dag_temp: float
+  eco_nacht_temp: float
+  comfort_blokken: str
+  horizon_uur: int(6,48)
+  ent_buiten_temp: str
+  ent_kamer_temp: str
+  ent_aanvoer_temp: str
+  ent_retour_temp: str
+  ent_debiet: str
+  ent_wp_elektrisch: str
+  ent_pv: str
+  ent_huislast: str
+  ent_net: str
+  ent_accu_vermogen: str
+  ent_soc: str
+  ent_prijs: str
+  ent_elwa: str
+  ent_boiler_temp: str
