@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import accutest
 import backtest
 import cop as copmod
 import data
@@ -19,7 +20,7 @@ from prices import forecast_uit_state, prijzen_voor, terugleverprijs, is_salderi
 from schema import comfortgrenzen, tapwatervraag, boiler_energie
 
 log = logging.getLogger("energiebrein")
-VERSIE = "0.1.5"
+VERSIE = "0.1.6"
 UITVOER = os.environ.get("EB_UITVOER", "/homeassistant/energiebrein")
 
 
@@ -41,6 +42,7 @@ class Brein:
         self.load = forecast.LoadModel()
         self.weer = None
         self.bt = {}
+        self.at = {}
         self.lat = self.lon = None
         self.laatste_training = None
         self.fouten: list[str] = []
@@ -73,6 +75,12 @@ class Brein:
         except Exception as e:
             self.fouten.append(f"terugrekentest: {e}")
             log.exception("backtest mislukt")
+        try:
+            self.at = accutest.run(self.hist, self.o)
+            log.info("accu-terugrekentest: %s", {k: v for k, v in self.at.items() if k != "dagen"})
+        except Exception as e:
+            self.fouten.append(f"accu-terugrekentest: {e}")
+            log.exception("accu-terugrekentest mislukt")
         self.laatste_training = datetime.now(timezone.utc)
         self._rapport()
 
@@ -191,6 +199,11 @@ class Brein:
             "friendly_name": "Energiebrein COP bij 7/35", "icon": "mdi:heat-pump",
             "cop_bij_2_45": round(float(self.cop.cop(2, 45)), 2),
             "cop_bij_-5_50": round(float(self.cop.cop(-5, 50)), 2), **cm})
+        if self.at:
+            self.ha.set_state("sensor.energiebrein_accu_terugrekentest", self.at.get("besparing_realistisch_per_dag_eur", 0), {
+                "friendly_name": "Energiebrein accu-terugrekentest besparing per dag", "unit_of_measurement": "EUR",
+                "icon": "mdi:battery-charging-high", **{k: v for k, v in self.at.items() if k != "dagen"},
+                "dagen": self.at.get("dagen", [])[-14:]})
         if self.bt:
             self.ha.set_state("sensor.energiebrein_terugrekentest", self.bt.get("besparing_per_dag_eur", 0), {
                 "friendly_name": "Energiebrein terugrekentest besparing per dag", "unit_of_measurement": "EUR",
@@ -224,6 +237,18 @@ class Brein:
                 L.append(f"| {x['datum']} | {x['echt_eur']} | {x['model_huidig_eur']} | {x['brein_eur']} | "
                          f"{x['besparing_eur']} | {x['wp_kwh_echt']} | {x['wp_kwh_model_huidig']} | "
                          f"{x['wp_kwh_brein']} | {x['comfort_tekort_kh']} |")
+        if self.at:
+            a = self.at
+            L += ["", "## Terugrekentest ALLEEN ACCU (echte meetdata)", a.get("melding", ""), "",
+                  f"Dagen: {a.get('aantal_dagen', 0)} | brein beter op {a.get('dagen_brein_beter', 0)} dagen | "
+                  f"besparing realistisch {a.get('besparing_realistisch_per_dag_eur')} EUR/dag "
+                  f"(perfecte voorspelling {a.get('besparing_perfect_per_dag_eur')} EUR/dag)", "",
+                  "| datum | werkelijk | brein realistisch | brein perfect | besparing | ontladen echt kWh | ontladen brein kWh | uren vasthouden | uren laden | prijs min-max |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+            for x in a.get("dagen", []):
+                L.append(f"| {x['datum']} | {x['echt_eur']} | {x['brein_realistisch_eur']} | {x['brein_perfect_eur']} | "
+                         f"{x['besparing_realistisch_eur']} | {x['ontladen_kwh_echt']} | {x['ontladen_kwh_brein']} | "
+                         f"{x['uren_vasthouden']} | {x['uren_laden']} | {x['prijs_min']}-{x['prijs_max']} |")
         if self.fouten:
             L += ["", "## Meldingen"] + [f"- {f}" for f in self.fouten]
         try:
