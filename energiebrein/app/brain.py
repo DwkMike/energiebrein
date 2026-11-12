@@ -15,12 +15,13 @@ import cop as copmod
 import data
 import forecast
 import house as housemod
+import zelfleren
 from optimizer import Invoer, plan
 from prices import forecast_uit_state, prijzen_voor, terugleverprijs, is_saldering
 from schema import comfortgrenzen, tapwatervraag, boiler_energie
 
 log = logging.getLogger("energiebrein")
-VERSIE = "0.1.6"
+VERSIE = "0.1.7"
 UITVOER = os.environ.get("EB_UITVOER", "/homeassistant/energiebrein")
 
 
@@ -43,6 +44,8 @@ class Brein:
         self.weer = None
         self.bt = {}
         self.at = {}
+        self.zl = zelfleren.Zelflerend()
+        self.vp: dict = {}
         self.lat = self.lon = None
         self.laatste_training = None
         self.fouten: list[str] = []
@@ -70,6 +73,11 @@ class Brein:
             self.fouten.append(f"weer/zon: {e}")
             log.exception("weer ophalen mislukt")
         self.load.fit(self.hist)
+        try:
+            self.zl.leer(self.hist)
+        except Exception as e:
+            self.fouten.append(f"zelfleren: {e}")
+            log.exception("zelfleren mislukt")
         try:
             self.bt = backtest.run(self.hist, self.house, self.cop, self.o)
         except Exception as e:
@@ -100,6 +108,7 @@ class Brein:
                                       o["pv_helling"], o["pv_azimut"])
             if fb is not None:
                 self.weer = fb
+        self._dagvoorspelling()
         w = None
         if self.weer is not None:
             w = self.weer.reindex(self.weer.index.union(idx)).interpolate(method="time").reindex(idx)
@@ -128,6 +137,51 @@ class Brein:
             return None
         self._publiceer(idx, r, inv, bekend, base80)
         return r
+
+    def _dagvoorspelling(self):
+        """Centrale dagvoorspelling (zon, temperatuur, verbruik) voor de hele installatie + snapshot om 21:00."""
+        o = self.o
+        try:
+            self.vp = self.zl.voorspel(self.weer, self.pv)
+            self.zl.snapshot(self.vp, _f(self.ha.state(o.get("ent_zon_forecast_morgen", "sensor.energy_production_tomorrow"))),
+                             _f(self.ha.state(o.get("ent_ha_dagbehoefte", "input_number.accu_geleerde_dagbehoefte"))))
+            huis = _f(self.ha.state(o.get("ent_huis_dag", "sensor.huis_verbruik_dag")))
+            elwa = _f(self.ha.state(o.get("ent_elwa_dag", "sensor.ac_elwa_e_1_energy_consumption_daily")), 0.0)
+            if huis is not None and self.vp.get("verbruik_vandaag") is not None:
+                self.vp["verbruik_vandaag_rest"] = round(max(self.vp["verbruik_vandaag"] - (huis - (elwa or 0.0)), 0.0), 1)
+            self._publiceer_dag()
+        except Exception as e:
+            log.warning("dagvoorspelling mislukt: %s", e)
+
+    def _publiceer_dag(self):
+        vp, q = self.vp, self.zl.kwaliteit
+        basis = {"bron": "Energiebrein zelflerend", "k_pv": vp.get("k_pv"), "verbruik_bias_kwh": vp.get("verbruik_bias")}
+        for naam, sleutel, uitleg in (("zon_vandaag_rest", "zon_vandaag_rest", "rest van vandaag"),
+                                      ("zon_vandaag", "zon_vandaag", "vandaag totaal"),
+                                      ("zon_morgen", "zon_morgen", "morgen")):
+            if vp.get(sleutel) is not None:
+                self.ha.set_state(f"sensor.energiebrein_{naam}", vp[sleutel], {
+                    "friendly_name": f"Energiebrein zon {uitleg}", "unit_of_measurement": "kWh",
+                    "device_class": "energy", "icon": "mdi:solar-power-variant",
+                    "ongecorrigeerd_kwh": vp.get(sleutel + "_ruw"), **basis})
+        for naam, uitleg in (("verbruik_vandaag", "vandaag totaal"), ("verbruik_vandaag_rest", "rest van vandaag"),
+                             ("verbruik_morgen", "morgen")):
+            if vp.get(naam) is not None:
+                dag = "morgen" if naam.endswith("morgen") else "vandaag"
+                self.ha.set_state(f"sensor.energiebrein_{naam}", vp[naam], {
+                    "friendly_name": f"Energiebrein verbruik {uitleg} (excl. ELWA)", "unit_of_measurement": "kWh",
+                    "device_class": "energy", "icon": "mdi:home-lightning-bolt",
+                    "buitentemp_gem": vp.get(f"tgem_{dag}"), "weekend": vp.get(f"weekend_{dag}"),
+                    "model": self.zl.verbruik.to_dict(), **basis})
+        if vp.get("tgem_morgen") is not None:
+            self.ha.set_state("sensor.energiebrein_buitentemp_morgen", vp["tgem_morgen"], {
+                "friendly_name": "Energiebrein gemiddelde buitentemperatuur morgen", "unit_of_measurement": "°C",
+                "device_class": "temperature", "icon": "mdi:thermometer"})
+        self.ha.set_state("sensor.energiebrein_voorspelkwaliteit", q.get("zon_mae_brein_kwh") if q else None, {
+            "friendly_name": "Energiebrein voorspelkwaliteit zon (gem. afwijking/dag)", "unit_of_measurement": "kWh",
+            "icon": "mdi:target", **(q or {}), "evaluatie": self.zl.s.get("evaluatie", [])[-14:],
+            "snapshots_wachtend": [d for d in self.zl.s.get("snapshots", {})
+                                   if d >= zelfleren._lokaal().date().isoformat()]})
 
     def _te_nu(self, Ti: float, To0: float) -> float:
         try:
@@ -226,6 +280,14 @@ class Brein:
         L += ["## Voorspellers",
               f"- Zon: {'LightGBM' if self.pv.model is not None else 'fysisch'}; MAE {self.pv.mae:.3f} kW",
               f"- Basisverbruik: MAE {self.load.mae:.3f} kW (naief 7-dagenprofiel {self.load.mae_naief:.3f} kW)", ""]
+        L += ["## Zelflerende dagvoorspelling", "```", json.dumps({"verbruiksmodel": self.zl.verbruik.to_dict(),
+              "k_pv": self.zl.s.get("k_pv"), "verbruik_bias": self.zl.s.get("verbruik_bias"),
+              "kwaliteit": self.zl.kwaliteit}, indent=1, default=str), "```", "",
+              "| datum | zon echt | brein | Forecast.Solar | verbruik echt | brein | HA-dagbehoefte |", "|---|---|---|---|---|---|---|"]
+        for e in self.zl.s.get("evaluatie", [])[-14:]:
+            L.append(f"| {e['datum']} | {e['zon_echt']} | {e.get('zon_brein')} | {e.get('zon_forecast_solar')} | "
+                     f"{e['verbruik_echt']} | {e.get('verbruik_brein')} | {e.get('verbruik_ha')} |")
+        L.append("")
         if self.bt:
             L += ["## Terugrekentest", self.bt.get("melding", ""), "",
                   f"Dagen: {self.bt.get('aantal_dagen', 0)}, werkelijk {self.bt.get('echt_totaal_eur')} EUR, "
