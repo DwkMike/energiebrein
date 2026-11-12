@@ -21,7 +21,7 @@ from prices import forecast_uit_state, prijzen_voor, terugleverprijs, is_salderi
 from schema import comfortgrenzen, tapwatervraag, boiler_energie
 
 log = logging.getLogger("energiebrein")
-VERSIE = "0.1.7"
+VERSIE = "0.1.8"
 UITVOER = os.environ.get("EB_UITVOER", "/homeassistant/energiebrein")
 
 
