@@ -35,6 +35,7 @@ def _f(state: dict | None, default=None):
 class Brein:
     def __init__(self, ha, opts: dict):
         self.ha = ha
+        opts.setdefault("ent_airco", "sensor.kwh_meter_vermogen")
         self.o = opts
         self.hist = pd.DataFrame()
         self.house = housemod.default_model()

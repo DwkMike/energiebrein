@@ -59,6 +59,7 @@ options:
   ent_prijs: sensor.zonneplan_current_quarter_hourly_electricity_tariff
   ent_elwa: sensor.zolder_ac_elwa_2_1_power_elwa_2
   ent_boiler_temp: sensor.wp_tank_temp
+  ent_airco: sensor.kwh_meter_vermogen
 schema:
   modus: list(schaduw)
   tarief_modus: list(auto|saldering|2027)
@@ -105,3 +106,4 @@ schema:
   ent_prijs: str
   ent_elwa: str
   ent_boiler_temp: str
+  ent_airco: "str?"

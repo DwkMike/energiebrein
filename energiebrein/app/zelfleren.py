@@ -31,22 +31,32 @@ EVAL_DAGEN = 14
 
 
 def dagtotalen(hist: pd.DataFrame) -> pd.DataFrame:
-    """Uurhistorie -> per lokale dag: zon kWh, verbruik excl. ELWA kWh, gemiddelde buitentemp, weekend."""
+    """Uurhistorie -> per lokale dag (kWh): zon, verbruik excl. ELWA, warmtepomp, airco, basis; gem. buitentemp."""
     need = {"pv", "house", "elwa", "To"}
     if hist is None or len(hist) == 0 or not need <= set(hist.columns):
         return pd.DataFrame()
-    d = hist[list(need)].copy()
+    d = hist[[c for c in ["pv", "house", "elwa", "To", "p_hp", "airco"] if c in hist.columns]].copy()
+    for c in ("p_hp", "airco"):
+        if c not in d:
+            d[c] = 0.0
     d["datum"] = d.index.tz_convert(TZ).date
     g = d.groupby("datum")
     n = g["house"].count()
+    f = 24 / n.clip(lower=1)
     out = pd.DataFrame({
-        "zon": g["pv"].sum() * 24 / n.clip(lower=1),
-        "verbruik": (g["house"].sum() - g["elwa"].sum()) * 24 / n.clip(lower=1),
+        "zon": g["pv"].sum() * f,
+        "verbruik": (g["house"].sum() - g["elwa"].sum()) * f,
+        "wp": g["p_hp"].sum() * f,
+        "airco": g["airco"].sum() * f,
         "To": g["To"].mean(),
         "n": n,
     })
     out = out[out["n"] >= 22].copy()   # alleen (bijna) volledige dagen; zomer/wintertijd = 23/25 uur
+    out["basis"] = (out["verbruik"] - out["wp"].fillna(0) - out["airco"].fillna(0)).clip(lower=0)
     out["weekend"] = [1 if pd.Timestamp(x).dayofweek >= 5 else 0 for x in out.index]
+    # afwezig (vakantie): basis < 50 % van de mediaan -> niet meenemen in het leren
+    med = out["basis"].median() if len(out) else 0
+    out["afwezig"] = out["basis"] < 0.5 * med
     return out
 
 
@@ -64,65 +74,101 @@ def _gewichten(datums, ref: date) -> np.ndarray:
 
 
 class VerbruiksModel:
+    """Verbruik morgen = basis (recent, per weekdag/weekend) + airco (recent) + warmtepomp (graaddagen).
+
+    De warmtepomp wordt alleen op stookdagen (WP > 5 kWh) gefit, zodat de zomer (alleen tapwater) en de
+    start van het stookseizoen het model niet vertekenen. Vakantiedagen tellen niet mee.
+    Een een-dag-vooruit terugtest vergelijkt dit met de HA-methode (EMA 0,25); de beste wint ('methode').
+    """
+
     def __init__(self):
-        self.a, self.b, self.c, self.tbasis = 35.0, 0.0, 0.0, 16.0
+        self.basis_werk, self.basis_weekend, self.airco, self.wp_vast = 15.0, 15.0, 0.0, 0.0
+        self.c_wp, self.tbasis, self.stookseizoen = 0.0, 16.0, False
+        self.ema = 35.0
         self.n = 0
         self.mae_model = float("nan")
         self.mae_ema = float("nan")
         self.methode = "standaard"
 
-    def _fit(self, dd: pd.DataFrame, ref: date, tbasis: float):
-        hdd = np.clip(tbasis - dd["To"].to_numpy(), 0, None)
-        X = np.column_stack([np.ones(len(dd)), hdd, dd["weekend"].to_numpy()])
-        y = dd["verbruik"].to_numpy()
-        w = np.sqrt(_gewichten(dd.index, ref))
-        coef, *_ = np.linalg.lstsq(X * w[:, None], y * w, rcond=None)
-        coef[1] = max(coef[1], 0.0)     # kouder mag nooit minder verbruik geven
-        res = y - X @ coef
-        return coef, float(np.sqrt(np.average(res ** 2, weights=w ** 2)))
+    @staticmethod
+    def _onderdelen(dd: pd.DataFrame, ref: date) -> dict:
+        r = {}
+        tw = dd[~dd["afwezig"]].tail(28)
+        w = _gewichten(tw.index, ref) if len(tw) else np.array([])
+        def gem(mask, kol, std):
+            x = tw[mask]
+            return float(np.average(x[kol], weights=w[mask.to_numpy()])) if len(x) else std
+        alle = float(np.average(tw["basis"], weights=w)) if len(tw) else 15.0
+        r["basis_werk"] = gem(tw["weekend"] == 0, "basis", alle)
+        r["basis_weekend"] = gem(tw["weekend"] == 1, "basis", alle)
+        r["airco"] = float(tw["airco"].tail(7).mean()) if len(tw) else 0.0
+        stook = dd[dd["wp"] > 5].tail(VENSTER_DAGEN)
+        r["stookseizoen"] = bool(len(dd) >= 3 and (dd["wp"].tail(5) > 5).sum() >= 3)
+        r["wp_vast"] = float(dd["wp"].tail(7).mean()) if len(dd) else 0.0
+        r["c_wp"], r["tbasis"] = 0.0, 16.0
+        if len(stook) >= 4:
+            ww = _gewichten(stook.index, ref)
+            best = None
+            for tb in (14.0, 15.0, 16.0, 17.0, 18.0):
+                x = np.clip(tb - stook["To"].to_numpy(), 0, None)
+                c = float(np.sum(ww * x * stook["wp"]) / max(np.sum(ww * x * x), 1e-6))
+                res = float(np.sum(ww * (stook["wp"].to_numpy() - c * x) ** 2))
+                if best is None or res < best[0]:
+                    best = (res, tb, c)
+            r["tbasis"], r["c_wp"] = best[1], max(best[2], 0.0)
+        return r
+
+    @staticmethod
+    def _voorspel(r: dict, tgem: float, weekend: int) -> float:
+        b = r["basis_weekend"] if weekend else r["basis_werk"]
+        wp = r["c_wp"] * max(0.0, r["tbasis"] - tgem) if (r["stookseizoen"] and r["c_wp"] > 0) else r["wp_vast"]
+        return max(0.0, b + r["airco"] + wp)
 
     def fit(self, dag: pd.DataFrame):
-        dd = dag.dropna(subset=["verbruik", "To"]).tail(VENSTER_DAGEN)
+        dd = dag.dropna(subset=["verbruik", "To"]).tail(VENSTER_DAGEN + 30)
         self.n = len(dd)
+        if self.n:
+            ema = float(dd["verbruik"].iloc[:7].mean())
+            for v in dd["verbruik"]:
+                ema = 0.75 * ema + 0.25 * float(v)
+            self.ema = ema
         if self.n < 10:
-            if self.n:
-                self.a = float(dd["verbruik"].mean())
-            self.methode = "gemiddelde (te weinig dagen)"
+            self.methode = "HA-methode (te weinig dagen)"
             return self
-        ref = dd.index[-1]
-        best = None
-        for tb in (14.0, 15.0, 16.0, 17.0, 18.0):
-            coef, rmse = self._fit(dd, ref, tb)
-            if best is None or rmse < best[2]:
-                best = (tb, coef, rmse)
-        self.tbasis, (self.a, self.b, self.c) = best[0], (float(x) for x in best[1])
-        self.methode = "graaddagen+weekend"
+        r = self._onderdelen(dd, dd.index[-1])
+        for k, v in r.items():
+            setattr(self, k, v)
         self._terugtest(dd)
+        self.methode = "onderdelen (basis+airco+WP graaddagen)" if not (self.mae_model > self.mae_ema) \
+            else "HA-methode (EMA) - onderdelenmodel scoorde slechter"
         return self
 
-    def _terugtest(self, dd: pd.DataFrame):
-        """Een-dag-vooruit test: model (gefit op de dagen ervoor) vs de HA-methode (EMA 0,25)."""
+    def _terugtest(self, dd: pd.DataFrame, dagen: int = 21):
         e_m, e_e = [], []
         ema = float(dd["verbruik"].iloc[:7].mean())
+        start = max(14, len(dd) - dagen)
         for i in range(len(dd)):
-            if i >= 14:
+            if i >= start and not dd["afwezig"].iloc[i]:
                 tr = dd.iloc[:i]
-                coef, _ = self._fit(tr, tr.index[-1], self.tbasis)
+                r = self._onderdelen(tr, tr.index[-1])
                 x = dd.iloc[i]
-                p = coef[0] + coef[1] * max(0.0, self.tbasis - x["To"]) + coef[2] * x["weekend"]
-                e_m.append(abs(p - x["verbruik"]))
+                e_m.append(abs(self._voorspel(r, x["To"], int(x["weekend"])) - x["verbruik"]))
                 e_e.append(abs(ema - x["verbruik"]))
             ema = 0.75 * ema + 0.25 * float(dd["verbruik"].iloc[i])
         if e_m:
             self.mae_model, self.mae_ema = float(np.mean(e_m)), float(np.mean(e_e))
 
     def predict(self, tgem: float, weekend: int) -> float:
-        return max(0.0, self.a + self.b * max(0.0, self.tbasis - tgem) + self.c * weekend)
+        if self.methode.startswith("HA-methode"):
+            return self.ema
+        return self._voorspel(self.__dict__, tgem, weekend)
 
     def to_dict(self):
-        r = lambda v: round(v, 3) if isinstance(v, float) and np.isfinite(v) else v  # noqa: E731
-        return {"basis_kwh": r(self.a), "kwh_per_graaddag": r(self.b), "weekend_kwh": r(self.c),
-                "graaddag_basis_c": self.tbasis, "dagen": self.n, "methode": self.methode,
+        r = lambda v: round(v, 2) if isinstance(v, float) and np.isfinite(v) else v  # noqa: E731
+        return {"methode": self.methode, "basis_werkdag_kwh": r(self.basis_werk),
+                "basis_weekend_kwh": r(self.basis_weekend), "airco_kwh": r(self.airco),
+                "wp_kwh_per_graaddag": r(self.c_wp), "graaddag_basis_c": self.tbasis,
+                "stookseizoen": self.stookseizoen, "ha_methode_kwh": r(self.ema), "dagen": self.n,
                 "terugtest_mae_model_kwh": r(self.mae_model), "terugtest_mae_ha_methode_kwh": r(self.mae_ema)}
 
 

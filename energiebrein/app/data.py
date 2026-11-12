@@ -26,6 +26,7 @@ KOLOMMEN = {
     "price": "ent_prijs",          # EUR/kWh incl. belasting
     "elwa_w": "ent_elwa",          # W
     "tank": "ent_boiler_temp",     # degC
+    "airco_w": "ent_airco",        # W (kWh-meter airco-groep)
 }
 
 DHW_AANVOER_GRENS = 56.0  # uur-gemiddelde aanvoer boven deze grens komt alleen bij tapwater voor
@@ -63,6 +64,7 @@ def afleiden(df: pd.DataFrame) -> pd.DataFrame:
     d["p_hp"] = d["p_hp_w"].clip(lower=0) / 1000.0
     d["pv"] = d["pv_w"].clip(lower=0) / 1000.0
     d["elwa"] = d["elwa_w"].fillna(0).clip(lower=0) / 1000.0
+    d["airco"] = (d["airco_w"].fillna(0).clip(lower=0) / 1000.0) if "airco_w" in d else 0.0
     d["grid"] = d["grid_w"] / 1000.0
     d["batt"] = d["batt_w"] / 1000.0
     d["house"] = d["house_w"].clip(lower=0) / 1000.0
